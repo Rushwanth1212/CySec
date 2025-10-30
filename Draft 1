@@ -1,0 +1,158 @@
+import os
+import hashlib
+import time
+import json
+import sys
+
+# --- CONFIGURATION ---
+# IMPORTANT: Change this path to the critical directory you want to monitor.
+# For demonstration, we use a simple 'monitored_data' folder created relative to the script.
+MONITORED_DIRECTORY = 'monitored_data'
+BASELINE_FILE = 'baseline.json'
+SCAN_INTERVAL_SECONDS = 5
+HASH_ALGORITHM = 'sha256'
+# --- END CONFIGURATION ---
+
+def notify_malware(message):
+    """Prints a highly visible notification message."""
+    print("\n" + "="*80)
+    print(f"!!! MALWARE ALERT / SECURITY INTEGRITY BREACH !!!".center(80))
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}".center(80))
+    print("="*80 + "\n")
+
+def calculate_hash(filepath, algorithm=HASH_ALGORITHM):
+    """Calculates the hash of a file, reading it in chunks for memory efficiency."""
+    try:
+        # Use the requested hashing algorithm
+        hasher = hashlib.new(algorithm)
+        buffer_size = 65536  # 64kb chunks
+
+        with open(filepath, 'rb') as f:
+            while True:
+                data = f.read(buffer_size)
+                if not data:
+                    break
+                hasher.update(data)
+        return hasher.hexdigest()
+    except PermissionError:
+        print(f"Warning: Access denied for file: {filepath}. Skipping.")
+        return None
+    except FileNotFoundError:
+        # File might have been deleted right before we tried to hash it
+        return None
+    except Exception as e:
+        print(f"Error reading file {filepath}: {e}")
+        return None
+
+def save_baseline(baseline_data):
+    """Saves the current file hashes to the baseline file."""
+    try:
+        with open(BASELINE_FILE, 'w') as f:
+            json.dump(baseline_data, f, indent=4)
+        print(f"Baseline saved successfully to {BASELINE_FILE}")
+    except Exception as e:
+        print(f"Error saving baseline file: {e}")
+
+def load_baseline():
+    """Loads the baseline file into a dictionary."""
+    try:
+        with open(BASELINE_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print("Error: Baseline file not found. Please run with 'create' argument first.")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print("Error: Baseline file is corrupted. Please recreate the baseline.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading baseline: {e}")
+        sys.exit(1)
+
+def build_current_state(directory):
+    """Scans the directory and builds the current file path -> hash map."""
+    current_state = {}
+    for root, _, files in os.walk(directory):
+        for filename in files:
+            filepath = os.path.join(root, filename)
+            # Use relative path for better portability and clarity in the baseline
+            relative_path = os.path.relpath(filepath, directory)
+            file_hash = calculate_hash(filepath)
+            if file_hash:
+                current_state[relative_path] = file_hash
+    return current_state
+
+def create_initial_baseline():
+    """Creates the initial baseline state and saves it."""
+    if not os.path.exists(MONITORED_DIRECTORY):
+        print(f"Creating monitored directory: {MONITORED_DIRECTORY}")
+        os.makedirs(MONITORED_DIRECTORY)
+        print("Add some critical files to this folder, then run the script again.")
+        sys.exit(0)
+
+    print(f"--- Creating Baseline for: {MONITORED_DIRECTORY} ---")
+    baseline_data = build_current_state(MONITORED_DIRECTORY)
+    save_baseline(baseline_data)
+    print("Baseline creation complete.")
+
+def check_integrity():
+    """Compares the current directory state against the loaded baseline."""
+    baseline = load_baseline()
+    current_state = build_current_state(MONITORED_DIRECTORY)
+
+    baseline_files = set(baseline.keys())
+    current_files = set(current_state.keys())
+
+    # 1. Check for New (Added) Files (Potential Malware)
+    new_files = current_files - baseline_files
+    for filepath in new_files:
+        notify_malware(f"NEW FILE DETECTED: {filepath} - Potential unauthorized injection or malware dropper.")
+
+    # 2. Check for Modified Files (Potential Tampering or Infection)
+    modified_files = []
+    common_files = current_files.intersection(baseline_files)
+    for filepath in common_files:
+        if current_state[filepath] != baseline[filepath]:
+            modified_files.append(filepath)
+            notify_malware(f"FILE MODIFIED: {filepath} - Hash mismatch detected. File integrity compromised.")
+
+    # 3. Check for Deleted Files (Potential Cover-Up or Ransomware)
+    deleted_files = baseline_files - current_files
+    for filepath in deleted_files:
+        notify_malware(f"FILE DELETED: {filepath} - A critical file has been removed unexpectedly.")
+
+    if not new_files and not modified_files and not deleted_files:
+        print(f"[{time.strftime('%H:%M:%S')}] Integrity check successful. No changes detected.")
+    else:
+        # Re-save the current state as the new baseline if changes were detected
+        # and the user needs to acknowledge them as legitimate (optional step, but useful for monitoring)
+        pass
+
+def main():
+    """Main function to handle command-line arguments and run the monitor loop."""
+    print("--- File Integrity Monitor Initializing ---")
+    print(f"Monitoring Directory: {MONITORED_DIRECTORY}")
+
+    if len(sys.argv) > 1 and sys.argv[1].lower() == 'create':
+        create_initial_baseline()
+        return
+
+    # Ensure baseline exists before starting monitoring
+    if not os.path.exists(BASELINE_FILE):
+        print("\n!!! CRITICAL !!!")
+        print("Baseline file not found.")
+        print(f"Run the script with argument 'create' to set the initial baseline: 'python {sys.argv[0]} create'")
+        print("!!! CRITICAL !!!\n")
+        sys.exit(1)
+
+    try:
+        print(f"Starting integrity monitoring. Checking every {SCAN_INTERVAL_SECONDS} seconds...")
+        while True:
+            check_integrity()
+            time.sleep(SCAN_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        print("\nMonitor stopped by user.")
+    except Exception as e:
+        print(f"An unexpected error occurred in the main loop: {e}")
+
+if __name__ == "__main__":
+    main()
